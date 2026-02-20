@@ -117,17 +117,38 @@ export interface BaseSessionOptions {
 }
 
 export interface ClaudeSessionOptions extends BaseSessionOptions {
+  /**
+   * Which Claude SDK backend to use.
+   *
+   * - `"v2"` — Persistent session via `unstable_v2_createSession`. One live process
+   *   across multiple `send()` calls — efficient for multi-turn orchestration.
+   *   Supports: `model`, `env`, `allowedTools`, `disallowedTools`, `permissionMode`, `hooks`.
+   *
+   * - `"v1"` — One-shot `query()` per `send()`, resumed via session ID. Heavier per
+   *   turn but supports all options including `cwd`, `maxTurns`, `outputFormat`,
+   *   `includePartialMessages`, `maxBudgetUsd`, `maxThinkingTokens`, `mcpServers`, `agents`.
+   *
+   * - `undefined` (default) — Auto-selects V2 when all options are V2-compatible,
+   *   falls back to V1 otherwise.
+   */
+  sdkVersion?: "v1" | "v2";
   resume?: string;
-  permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan";
+  permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk";
   allowDangerouslySkipPermissions?: boolean;
   allowedTools?: string[];
   disallowedTools?: string[];
+  /** V1 only. Ignored when sdkVersion is "v2". */
   maxBudgetUsd?: number;
+  /** V1 only. Ignored when sdkVersion is "v2". */
   maxThinkingTokens?: number;
+  /** V1 only. Ignored when sdkVersion is "v2". */
   outputFormat?: { type: "json_schema"; schema: Record<string, unknown> };
+  /** V1 only. Ignored when sdkVersion is "v2". */
   mcpServers?: Record<string, unknown>;
+  /** V1 only. Ignored when sdkVersion is "v2". */
   agents?: Record<string, unknown>;
   hooks?: Record<string, unknown>;
+  /** V1 only. Ignored when sdkVersion is "v2". */
   includePartialMessages?: boolean;
 }
 

@@ -9,10 +9,11 @@ export class ProviderError extends UnifaiError {
   constructor(
     message: string,
     public readonly provider: string,
-    public readonly cause?: unknown,
+    cause?: unknown,
   ) {
     super(message);
     this.name = "ProviderError";
+    if (cause !== undefined) this.cause = cause;
   }
 }
 

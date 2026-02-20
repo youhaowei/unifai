@@ -250,6 +250,28 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
+  test("maps turn.completed with zero cached tokens → preserves 0", () => {
+    const events = collect({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+        cached_input_tokens: 0,
+      },
+    });
+
+    expect(events).toEqual([
+      {
+        type: "turn_complete",
+        usage: {
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 0,
+        },
+      },
+    ]);
+  });
+
   test("maps turn.completed without usage", () => {
     const events = collect({ type: "turn.completed" });
 

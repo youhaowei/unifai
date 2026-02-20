@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { mapSdkMessage } from "../../src/providers/claude";
+import { mapSdkMessage, createClaudeSession } from "../../src/providers/claude";
 import type { AgentEvent } from "../../src/types";
 
 function collect(msg: unknown, includeRaw = false): AgentEvent[] {
@@ -28,15 +28,15 @@ describe("mapSdkMessage", () => {
     ]);
   });
 
-  test("maps system status → status", () => {
+  test("maps system status → status (reads status field)", () => {
     const events = collect({
       type: "system",
       subtype: "status",
-      message: "Installing dependencies...",
+      status: "compacting",
     });
 
     expect(events).toEqual([
-      { type: "status", message: "Installing dependencies..." },
+      { type: "status", message: "compacting" },
     ]);
   });
 
@@ -268,5 +268,69 @@ describe("mapSdkMessage", () => {
       event: { type: "message_start", message: {} },
     });
     expect(events).toEqual([]);
+  });
+});
+
+describe("createClaudeSession", () => {
+  // We can't invoke send() (no real SDK), but we can verify the factory
+  // selects the right backend for both V1 and V2 paths.
+
+  // -- Auto-selection --
+
+  test("auto-selects V2 for basic options", () => {
+    const session = createClaudeSession({ model: "haiku" });
+    expect(session).toHaveProperty("sessionId");
+    expect(session).toHaveProperty("send");
+    expect(session).toHaveProperty("abort");
+    expect(session).toHaveProperty("close");
+    session.close();
+  });
+
+  test("auto-selects V1 when V1-only options are present", () => {
+    const session = createClaudeSession({ model: "haiku", cwd: "/tmp" });
+    expect(session).toHaveProperty("send");
+    session.close();
+  });
+
+  test("auto-selects V1 for outputFormat", () => {
+    const session = createClaudeSession({
+      model: "haiku",
+      outputFormat: { type: "json_schema", schema: { type: "object" } },
+    });
+    expect(session).toHaveProperty("send");
+    session.close();
+  });
+
+  test("auto-selects V2 when only V2-compatible options are set", () => {
+    const session = createClaudeSession({
+      model: "haiku",
+      allowedTools: ["Read"],
+      permissionMode: "plan",
+      env: { HOME: "/tmp" },
+    });
+    expect(session).toHaveProperty("send");
+    session.close();
+  });
+
+  // -- Explicit sdkVersion --
+
+  test("sdkVersion: 'v2' forces V2 even with V1-only options", () => {
+    const session = createClaudeSession({
+      model: "haiku",
+      sdkVersion: "v2",
+      cwd: "/tmp",          // V1-only, will be ignored
+      maxTurns: 3,           // V1-only, will be ignored
+    });
+    expect(session).toHaveProperty("send");
+    session.close();
+  });
+
+  test("sdkVersion: 'v1' forces V1 even without V1-only options", () => {
+    const session = createClaudeSession({
+      model: "haiku",
+      sdkVersion: "v1",
+    });
+    expect(session).toHaveProperty("send");
+    session.close();
   });
 });

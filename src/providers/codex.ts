@@ -32,7 +32,7 @@ export function* mapThreadEvent(event: ThreadEvent, includeRaw: boolean): Genera
         ? {
             inputTokens: raw.usage.input_tokens,
             outputTokens: raw.usage.output_tokens,
-            cacheReadTokens: raw.usage.cached_input_tokens || undefined,
+            cacheReadTokens: raw.usage.cached_input_tokens != null ? raw.usage.cached_input_tokens : undefined,
           }
         : undefined;
       yield { type: "turn_complete", usage };
@@ -187,13 +187,38 @@ class CodexProviderSession implements ProviderSession {
     });
 
     const includeRaw = this.options.includeRawEvents ?? false;
+    const startTime = Date.now();
+    let accUsage: Usage = { inputTokens: 0, outputTokens: 0 };
+    let numTurns = 0;
 
     for await (const event of events) {
       if (event.type === "thread.started") {
         this._sessionId = (event as { thread_id: string }).thread_id;
       }
+      // Accumulate usage from turn events for the synthesized session_complete
+      if (event.type === "turn.completed") {
+        numTurns++;
+        const raw = event as { usage?: { input_tokens: number; output_tokens: number; cached_input_tokens: number } };
+        if (raw.usage) {
+          accUsage = {
+            inputTokens: accUsage.inputTokens + raw.usage.input_tokens,
+            outputTokens: accUsage.outputTokens + raw.usage.output_tokens,
+            cacheReadTokens: raw.usage.cached_input_tokens
+              ? (accUsage.cacheReadTokens ?? 0) + raw.usage.cached_input_tokens
+              : accUsage.cacheReadTokens,
+          };
+        }
+      }
       yield* mapThreadEvent(event, includeRaw);
     }
+
+    // Synthesize session_complete — Codex SDK has no equivalent to Claude's result message
+    yield {
+      type: "session_complete",
+      usage: accUsage,
+      durationMs: Date.now() - startTime,
+      numTurns,
+    };
   }
 
   abort() {

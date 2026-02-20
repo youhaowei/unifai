@@ -1,4 +1,9 @@
-import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query as sdkQuery,
+  unstable_v2_createSession as createSdkSession,
+  unstable_v2_resumeSession as resumeSdkSession,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { SDKSession, SDKSessionOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentEvent, ClaudeSessionOptions, Usage } from "../types";
 import type { ProviderSession } from "../provider";
 
@@ -61,11 +66,11 @@ function* mapSystemMessage(msg: any): Generator<AgentEvent> {
       };
       break;
     case "status":
-      yield { type: "status", message: String(msg.message ?? "") };
+      yield { type: "status", message: msg.status ? String(msg.status) : "status update" };
       break;
     default:
       // hook_started, hook_progress, hook_response, task_notification
-      yield { type: "status", message: `[${msg.subtype}] ${msg.message ?? ""}`.trim() };
+      yield { type: "status", message: `[${msg.subtype}] ${msg.summary ?? msg.message ?? ""}`.trim() };
       break;
   }
 }
@@ -146,9 +151,71 @@ function* mapResultMessage(msg: any): Generator<AgentEvent> {
   }
 }
 
-// --- Provider session ---
+// --- V2 provider session (unstable session API) ---
+// Used when all options are V2-compatible: cleaner send()/stream() lifecycle.
 
-class ClaudeProviderSession implements ProviderSession {
+class ClaudeV2ProviderSession implements ProviderSession {
+  private session: SDKSession | null = null;
+  private _sessionId: string | null = null;
+
+  constructor(private readonly options: ClaudeSessionOptions) {
+    this._sessionId = options.resume ?? null;
+
+    // Wire abort signal → close session (V2 has no native AbortController option)
+    if (options.abortController) {
+      options.abortController.signal.addEventListener("abort", () => {
+        this.session?.close();
+      }, { once: true });
+    }
+  }
+
+  get sessionId() {
+    return this._sessionId;
+  }
+
+  async *send(message: string): AsyncGenerator<AgentEvent> {
+    if (!this.session) {
+      const sdkOpts: SDKSessionOptions = {
+        model: this.options.model,
+        env: this.options.env,
+        allowedTools: this.options.allowedTools,
+        disallowedTools: this.options.disallowedTools,
+        permissionMode: this.options.permissionMode,
+        hooks: this.options.hooks as SDKSessionOptions["hooks"],
+      };
+
+      this.session = this._sessionId
+        ? resumeSdkSession(this._sessionId, sdkOpts)
+        : createSdkSession(sdkOpts);
+    }
+
+    await this.session.send(message);
+
+    const includeRaw = this.options.includeRawEvents ?? false;
+
+    for await (const msg of this.session.stream()) {
+      if (msg.type === "system" && (msg as any).subtype === "init") {
+        this._sessionId = (msg as any).session_id ?? null;
+      }
+      yield* mapSdkMessage(msg, includeRaw);
+    }
+  }
+
+  abort() {
+    this.session?.close();
+  }
+
+  close() {
+    this.session?.close();
+    this.session = null;
+  }
+}
+
+// --- V1 provider session (query API) ---
+// Fallback when options require fields V2 doesn't support yet
+// (cwd, maxTurns, outputFormat, includePartialMessages, etc.)
+
+class ClaudeV1ProviderSession implements ProviderSession {
   private _sessionId: string | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private currentQuery: any = null;
@@ -190,10 +257,7 @@ class ClaudeProviderSession implements ProviderSession {
 
     try {
       for await (const msg of stream) {
-        // Capture session ID from init message
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         if (msg.type === "system" && (msg as any).subtype === "init") {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           this._sessionId = (msg as any).session_id ?? null;
         }
         yield* mapSdkMessage(msg, includeRaw);
@@ -215,6 +279,38 @@ class ClaudeProviderSession implements ProviderSession {
   }
 }
 
+// --- Factory ---
+
+/** Options not yet available in V2 SDKSessionOptions. */
+const V1_ONLY_OPTIONS: (keyof ClaudeSessionOptions)[] = [
+  "cwd",
+  "maxTurns",
+  "maxBudgetUsd",
+  "maxThinkingTokens",
+  "includePartialMessages",
+  "outputFormat",
+  "mcpServers",
+  "agents",
+  "allowDangerouslySkipPermissions",
+];
+
+function hasV1OnlyOptions(options: ClaudeSessionOptions): boolean {
+  return V1_ONLY_OPTIONS.some((key) => options[key] != null);
+}
+
 export function createClaudeSession(options: ClaudeSessionOptions): ProviderSession {
-  return new ClaudeProviderSession(options);
+  const version = options.sdkVersion;
+
+  if (version === "v1") {
+    return new ClaudeV1ProviderSession(options);
+  }
+
+  if (version === "v2") {
+    return new ClaudeV2ProviderSession(options);
+  }
+
+  // Auto: prefer V2, fall back to V1 when V1-only options are present
+  return hasV1OnlyOptions(options)
+    ? new ClaudeV1ProviderSession(options)
+    : new ClaudeV2ProviderSession(options);
 }
