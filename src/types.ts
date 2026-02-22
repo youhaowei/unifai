@@ -6,6 +6,16 @@ export interface SessionInitEvent {
   model?: string;
   tools?: string[];
   cwd?: string;
+  /** Claude-specific: Claude Code version string */
+  claudeCodeVersion?: string;
+  /** Claude-specific: connected MCP servers */
+  mcpServers?: Array<{ name: string; status: string }>;
+  /** Claude-specific: active permission mode */
+  permissionMode?: string;
+  /** Claude-specific: available slash commands */
+  slashCommands?: string[];
+  /** Claude-specific: available skills */
+  skills?: string[];
 }
 
 export interface TextDeltaEvent {
@@ -16,6 +26,8 @@ export interface TextDeltaEvent {
 export interface ThinkingDeltaEvent {
   type: "thinking_delta";
   text: string;
+  /** Content block index (Claude-specific) */
+  index?: number;
 }
 
 export interface TextCompleteEvent {
@@ -59,17 +71,23 @@ export interface TurnCompleteEvent {
 
 export interface SessionCompleteEvent {
   type: "session_complete";
+  subtype?: string;
   result?: string;
   structuredOutput?: unknown;
   usage: Usage;
   durationMs: number;
+  durationApiMs?: number;
   numTurns: number;
   costUsd?: number;
+  modelUsage?: Record<string, ModelUsage>;
+  errors?: string[];
 }
 
 export interface StatusEvent {
   type: "status";
   message: string;
+  /** Claude-specific: active permission mode (from system/status events) */
+  permissionMode?: string;
 }
 
 export interface ErrorEvent {
@@ -86,6 +104,108 @@ export interface RawEvent {
   data: unknown;
 }
 
+// --- Message lifecycle events (Claude stream_event subtypes) ---
+
+export interface MessageStartEvent {
+  type: "message_start";
+  messageId: string;
+  model: string;
+  stopReason: string | null;
+  usage: Usage;
+}
+
+export interface MessageStopEvent {
+  type: "message_stop";
+}
+
+// --- Content block lifecycle events (Claude stream_event subtypes) ---
+
+export interface ContentBlockStartEvent {
+  type: "content_block_start";
+  index: number;
+  blockType: "text" | "tool_use" | "thinking";
+  id?: string;
+  name?: string;
+}
+
+export interface ContentBlockStopEvent {
+  type: "content_block_stop";
+  index: number;
+}
+
+// --- Full assistant message (Claude 'assistant' message type) ---
+
+export interface AssistantMessageEvent {
+  type: "assistant_message";
+  messageId: string;
+  uuid?: string;
+  sessionId: string;
+  model: string;
+  stopReason: string | null;
+  usage: Usage;
+  content: ContentBlock[];
+  error?: string;
+}
+
+export interface ContentBlock {
+  type: "text" | "tool_use" | "thinking";
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: unknown;
+  thinking?: string;
+}
+
+// --- Auth events (Claude-specific) ---
+
+export interface AuthStatusEvent {
+  type: "auth_status";
+  isAuthenticating: boolean;
+  output: string[];
+  error?: string;
+}
+
+// --- Hook lifecycle events (Claude-specific) ---
+
+export interface HookStartedEvent {
+  type: "hook_started";
+  hookId: string;
+  hookName: string;
+  hookEvent: string;
+}
+
+export interface HookProgressEvent {
+  type: "hook_progress";
+  hookId: string;
+  hookName: string;
+  hookEvent: string;
+  stdout: string;
+  stderr: string;
+  output: string;
+}
+
+export interface HookResponseEvent {
+  type: "hook_response";
+  hookId: string;
+  hookName: string;
+  hookEvent: string;
+  outcome: string;
+  output: string;
+  exitCode?: number;
+}
+
+// --- Task notification events (Claude-specific) ---
+
+export interface TaskNotificationEvent {
+  type: "task_notification";
+  taskId: string;
+  status: string;
+  outputFile: string;
+  summary: string;
+}
+
+// --- Discriminated union ---
+
 export type AgentEvent =
   | SessionInitEvent
   | TextDeltaEvent
@@ -99,7 +219,23 @@ export type AgentEvent =
   | SessionCompleteEvent
   | StatusEvent
   | ErrorEvent
-  | RawEvent;
+  | RawEvent
+  // Message lifecycle
+  | MessageStartEvent
+  | MessageStopEvent
+  // Content block lifecycle
+  | ContentBlockStartEvent
+  | ContentBlockStopEvent
+  // Full assistant message
+  | AssistantMessageEvent
+  // Auth
+  | AuthStatusEvent
+  // Hook lifecycle
+  | HookStartedEvent
+  | HookProgressEvent
+  | HookResponseEvent
+  // Task notification
+  | TaskNotificationEvent;
 
 // --- Provider kinds ---
 
@@ -170,6 +306,17 @@ export interface Usage {
   cacheCreationTokens?: number;
 }
 
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  webSearchRequests?: number;
+  costUsd?: number;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
 export interface SessionResult {
   text: string;
   structuredOutput?: unknown;
@@ -177,6 +324,14 @@ export interface SessionResult {
   durationMs: number;
   numTurns: number;
   costUsd?: number;
+}
+
+// --- Model discovery ---
+
+export interface ModelInfo {
+  id: string;
+  displayName: string;
+  description: string;
 }
 
 // --- Session interface (public contract) ---

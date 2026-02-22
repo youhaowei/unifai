@@ -2,13 +2,14 @@ import type {
   AgentEvent,
   ClaudeSessionOptions,
   CodexSessionOptions,
+  ModelInfo,
   ProviderKind,
   SessionResult,
   UnifaiSession,
   Usage,
 } from "./types";
 import { ProviderError } from "./errors";
-import { createClaudeSession } from "./providers/claude";
+import { createClaudeSession, getClaudeSupportedModels } from "./providers/claude";
 import { createCodexSession } from "./providers/codex";
 import type { ProviderSession } from "./provider";
 
@@ -167,4 +168,24 @@ function isAbortError(err: unknown): boolean {
   if (err instanceof DOMException && err.name === "AbortError") return true;
   if (err instanceof Error && err.name === "AbortError") return true;
   return false;
+}
+
+// --- Model discovery ---
+
+export async function getSupportedModels(
+  provider: "claude",
+  options?: { env?: Record<string, string | undefined>; cwd?: string },
+): Promise<ModelInfo[]>;
+export async function getSupportedModels(
+  provider: ProviderKind,
+  options?: { env?: Record<string, string | undefined>; cwd?: string },
+): Promise<ModelInfo[]> {
+  switch (provider) {
+    case "claude":
+      return getClaudeSupportedModels(options);
+    case "codex":
+      throw new ProviderError("getSupportedModels not yet implemented for codex", "codex");
+    default:
+      throw new ProviderError(`Unknown provider: ${provider}`, provider);
+  }
 }

@@ -7,7 +7,9 @@ function collect(msg: unknown, includeRaw = false): AgentEvent[] {
 }
 
 describe("mapSdkMessage", () => {
-  test("maps system init → session_init", () => {
+  // --- System messages ---
+
+  test("maps system init → session_init with Claude-specific fields", () => {
     const events = collect({
       type: "system",
       subtype: "init",
@@ -15,6 +17,11 @@ describe("mapSdkMessage", () => {
       model: "claude-sonnet-4-20250514",
       tools: ["Read", "Write", "Bash"],
       cwd: "/home/user/project",
+      claude_code_version: "1.2.3",
+      mcp_servers: [{ name: "test", status: "connected" }],
+      permissionMode: "default",
+      slash_commands: ["/commit"],
+      skills: ["review-pr"],
     });
 
     expect(events).toEqual([
@@ -24,11 +31,16 @@ describe("mapSdkMessage", () => {
         model: "claude-sonnet-4-20250514",
         tools: ["Read", "Write", "Bash"],
         cwd: "/home/user/project",
+        claudeCodeVersion: "1.2.3",
+        mcpServers: [{ name: "test", status: "connected" }],
+        permissionMode: "default",
+        slashCommands: ["/commit"],
+        skills: ["review-pr"],
       },
     ]);
   });
 
-  test("maps system status → status (reads status field)", () => {
+  test("maps system status → status", () => {
     const events = collect({
       type: "system",
       subtype: "status",
@@ -38,6 +50,178 @@ describe("mapSdkMessage", () => {
     expect(events).toEqual([
       { type: "status", message: "compacting" },
     ]);
+  });
+
+  test("maps system hook_started → hook_started", () => {
+    const events = collect({
+      type: "system",
+      subtype: "hook_started",
+      hook_id: "h-1",
+      hook_name: "pre-commit",
+      hook_event: "ToolUse",
+    });
+
+    expect(events).toEqual([
+      { type: "hook_started", hookId: "h-1", hookName: "pre-commit", hookEvent: "ToolUse" },
+    ]);
+  });
+
+  test("maps system hook_progress → hook_progress", () => {
+    const events = collect({
+      type: "system",
+      subtype: "hook_progress",
+      hook_id: "h-1",
+      hook_name: "pre-commit",
+      hook_event: "ToolUse",
+      stdout: "running...",
+      stderr: "",
+      output: "running...",
+    });
+
+    expect(events).toEqual([
+      {
+        type: "hook_progress",
+        hookId: "h-1",
+        hookName: "pre-commit",
+        hookEvent: "ToolUse",
+        stdout: "running...",
+        stderr: "",
+        output: "running...",
+      },
+    ]);
+  });
+
+  test("maps system hook_response → hook_response", () => {
+    const events = collect({
+      type: "system",
+      subtype: "hook_response",
+      hook_id: "h-1",
+      hook_name: "pre-commit",
+      hook_event: "ToolUse",
+      outcome: "success",
+      output: "done",
+      exit_code: 0,
+    });
+
+    expect(events).toEqual([
+      {
+        type: "hook_response",
+        hookId: "h-1",
+        hookName: "pre-commit",
+        hookEvent: "ToolUse",
+        outcome: "success",
+        output: "done",
+        exitCode: 0,
+      },
+    ]);
+  });
+
+  test("maps system task_notification → task_notification", () => {
+    const events = collect({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "t-42",
+      status: "completed",
+      output_file: "/tmp/out.txt",
+      summary: "Task finished",
+    });
+
+    expect(events).toEqual([
+      {
+        type: "task_notification",
+        taskId: "t-42",
+        status: "completed",
+        outputFile: "/tmp/out.txt",
+        summary: "Task finished",
+      },
+    ]);
+  });
+
+  test("maps unknown system subtype → status fallback", () => {
+    const events = collect({
+      type: "system",
+      subtype: "future_thing",
+      summary: "something happened",
+    });
+
+    expect(events).toEqual([
+      { type: "status", message: "[future_thing] something happened" },
+    ]);
+  });
+
+  // --- Stream events ---
+
+  test("maps stream message_start → message_start", () => {
+    const events = collect({
+      type: "stream_event",
+      event: {
+        type: "message_start",
+        message: {
+          id: "msg-001",
+          model: "claude-sonnet-4-20250514",
+          stop_reason: null,
+          usage: { input_tokens: 100, output_tokens: 0, cache_read_input_tokens: 50 },
+        },
+      },
+    });
+
+    expect(events).toEqual([
+      {
+        type: "message_start",
+        messageId: "msg-001",
+        model: "claude-sonnet-4-20250514",
+        stopReason: null,
+        usage: { inputTokens: 100, outputTokens: 0, cacheReadTokens: 50, cacheCreationTokens: undefined },
+      },
+    ]);
+  });
+
+  test("maps stream message_stop → message_stop", () => {
+    const events = collect({
+      type: "stream_event",
+      event: { type: "message_stop" },
+    });
+
+    expect(events).toEqual([{ type: "message_stop" }]);
+  });
+
+  test("maps stream content_block_start → content_block_start", () => {
+    const events = collect({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text" },
+      },
+    });
+
+    expect(events).toEqual([
+      { type: "content_block_start", index: 0, blockType: "text", id: undefined, name: undefined },
+    ]);
+  });
+
+  test("maps stream content_block_start tool_use with id and name", () => {
+    const events = collect({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "tool_use", id: "tu-001", name: "Read" },
+      },
+    });
+
+    expect(events).toEqual([
+      { type: "content_block_start", index: 1, blockType: "tool_use", id: "tu-001", name: "Read" },
+    ]);
+  });
+
+  test("maps stream content_block_stop → content_block_stop", () => {
+    const events = collect({
+      type: "stream_event",
+      event: { type: "content_block_stop", index: 2 },
+    });
+
+    expect(events).toEqual([{ type: "content_block_stop", index: 2 }]);
   });
 
   test("maps text_delta stream event → text_delta", () => {
@@ -54,17 +238,18 @@ describe("mapSdkMessage", () => {
     ]);
   });
 
-  test("maps thinking_delta stream event → thinking_delta", () => {
+  test("maps thinking_delta stream event → thinking_delta with index", () => {
     const events = collect({
       type: "stream_event",
       event: {
         type: "content_block_delta",
+        index: 0,
         delta: { type: "thinking_delta", thinking: "Let me think..." },
       },
     });
 
     expect(events).toEqual([
-      { type: "thinking_delta", text: "Let me think..." },
+      { type: "thinking_delta", text: "Let me think...", index: 0 },
     ]);
   });
 
@@ -78,54 +263,77 @@ describe("mapSdkMessage", () => {
     });
 
     expect(events).toEqual([
-      { type: "thinking_delta", text: "fallback" },
+      { type: "thinking_delta", text: "fallback", index: undefined },
     ]);
   });
 
-  test("maps assistant text block → text_complete", () => {
+  // --- Assistant messages ---
+
+  test("maps assistant → assistant_message + text_complete", () => {
     const events = collect({
       type: "assistant",
+      uuid: "uuid-1",
+      session_id: "sess-1",
       message: {
+        id: "msg-002",
+        model: "claude-sonnet-4-20250514",
+        stop_reason: "end_turn",
+        usage: { input_tokens: 100, output_tokens: 50 },
         content: [
           { type: "text", text: "Here is the answer." },
         ],
       },
     });
 
-    expect(events).toEqual([
-      { type: "text_complete", text: "Here is the answer." },
-    ]);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual({
+      type: "assistant_message",
+      messageId: "msg-002",
+      uuid: "uuid-1",
+      sessionId: "sess-1",
+      model: "claude-sonnet-4-20250514",
+      stopReason: "end_turn",
+      usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: undefined, cacheCreationTokens: undefined },
+      content: [{ type: "text", text: "Here is the answer." }],
+      error: undefined,
+    });
+    expect(events[1]).toEqual({ type: "text_complete", text: "Here is the answer." });
   });
 
-  test("maps assistant tool_use block → tool_start", () => {
+  test("maps assistant tool_use → assistant_message + tool_start", () => {
     const events = collect({
       type: "assistant",
+      session_id: "sess-1",
       message: {
+        id: "msg-003",
+        model: "claude-sonnet-4-20250514",
+        stop_reason: "tool_use",
+        usage: { input_tokens: 200, output_tokens: 100 },
         content: [
-          {
-            type: "tool_use",
-            id: "tu-001",
-            name: "Read",
-            input: { file_path: "/tmp/test.ts" },
-          },
+          { type: "tool_use", id: "tu-001", name: "Read", input: { file_path: "/tmp/test.ts" } },
         ],
       },
     });
 
-    expect(events).toEqual([
-      {
-        type: "tool_start",
-        toolUseId: "tu-001",
-        toolName: "Read",
-        input: { file_path: "/tmp/test.ts" },
-      },
-    ]);
+    expect(events).toHaveLength(2);
+    expect(events[0]!.type).toBe("assistant_message");
+    expect(events[1]).toEqual({
+      type: "tool_start",
+      toolUseId: "tu-001",
+      toolName: "Read",
+      input: { file_path: "/tmp/test.ts" },
+    });
   });
 
-  test("maps assistant with mixed content → multiple events", () => {
+  test("maps assistant with mixed content → assistant_message + individual events", () => {
     const events = collect({
       type: "assistant",
+      session_id: "sess-1",
       message: {
+        id: "msg-004",
+        model: "sonnet",
+        stop_reason: "tool_use",
+        usage: { input_tokens: 50, output_tokens: 50 },
         content: [
           { type: "text", text: "Let me read that file." },
           { type: "tool_use", id: "tu-002", name: "Read", input: { file_path: "/tmp/a.ts" } },
@@ -133,12 +341,15 @@ describe("mapSdkMessage", () => {
       },
     });
 
-    expect(events).toHaveLength(2);
-    expect(events[0]!.type).toBe("text_complete");
-    expect(events[1]!.type).toBe("tool_start");
+    expect(events).toHaveLength(3);
+    expect(events[0]!.type).toBe("assistant_message");
+    expect(events[1]!.type).toBe("text_complete");
+    expect(events[2]!.type).toBe("tool_start");
   });
 
-  test("maps result success → session_complete", () => {
+  // --- Result messages ---
+
+  test("maps result success → session_complete with modelUsage", () => {
     const events = collect({
       type: "result",
       subtype: "success",
@@ -151,13 +362,27 @@ describe("mapSdkMessage", () => {
         cache_creation_input_tokens: 50,
       },
       duration_ms: 3500,
+      duration_api_ms: 3000,
       num_turns: 2,
       total_cost_usd: 0.015,
+      modelUsage: {
+        "claude-sonnet-4-20250514": {
+          inputTokens: 1000,
+          outputTokens: 500,
+          cacheReadInputTokens: 200,
+          cacheCreationInputTokens: 50,
+          webSearchRequests: 0,
+          costUSD: 0.015,
+          contextWindow: 200000,
+          maxOutputTokens: 16384,
+        },
+      },
     });
 
     expect(events).toEqual([
       {
         type: "session_complete",
+        subtype: "success",
         result: "Task completed",
         structuredOutput: { key: "value" },
         usage: {
@@ -167,8 +392,22 @@ describe("mapSdkMessage", () => {
           cacheCreationTokens: 50,
         },
         durationMs: 3500,
+        durationApiMs: 3000,
         numTurns: 2,
         costUsd: 0.015,
+        modelUsage: {
+          "claude-sonnet-4-20250514": {
+            inputTokens: 1000,
+            outputTokens: 500,
+            cacheReadTokens: 200,
+            cacheCreationTokens: 50,
+            webSearchRequests: 0,
+            costUsd: 0.015,
+            contextWindow: 200000,
+            maxOutputTokens: 16384,
+          },
+        },
+        errors: undefined,
       },
     ]);
   });
@@ -188,6 +427,7 @@ describe("mapSdkMessage", () => {
 
     expect(events[0]).toEqual({
       type: "session_complete",
+      subtype: "error_max_turns",
       result: "Partial result",
       structuredOutput: undefined,
       usage: {
@@ -197,8 +437,11 @@ describe("mapSdkMessage", () => {
         cacheCreationTokens: undefined,
       },
       durationMs: 2000,
+      durationApiMs: undefined,
       numTurns: 5,
       costUsd: undefined,
+      modelUsage: undefined,
+      errors: ["Max turns exceeded"],
     });
 
     expect(events[1]).toEqual({
@@ -208,6 +451,8 @@ describe("mapSdkMessage", () => {
       recoverable: false,
     });
   });
+
+  // --- Tool progress / summary ---
 
   test("maps tool_progress → tool_progress", () => {
     const events = collect({
@@ -243,6 +488,28 @@ describe("mapSdkMessage", () => {
     ]);
   });
 
+  // --- Auth status ---
+
+  test("maps auth_status → auth_status", () => {
+    const events = collect({
+      type: "auth_status",
+      isAuthenticating: true,
+      output: ["Opening browser..."],
+      error: undefined,
+    });
+
+    expect(events).toEqual([
+      {
+        type: "auth_status",
+        isAuthenticating: true,
+        output: ["Opening browser..."],
+        error: undefined,
+      },
+    ]);
+  });
+
+  // --- Raw / edge cases ---
+
   test("includes raw event when includeRaw is true", () => {
     const msg = { type: "system", subtype: "init", session_id: "s-1" };
     const events = collect(msg, true);
@@ -253,7 +520,6 @@ describe("mapSdkMessage", () => {
       eventType: "system",
       data: msg,
     });
-    // session_init follows
     expect(events[1]!.type).toBe("session_init");
   });
 
@@ -261,22 +527,9 @@ describe("mapSdkMessage", () => {
     const events = collect({ type: "unknown_future_type", foo: "bar" });
     expect(events).toEqual([]);
   });
-
-  test("ignores stream events without delta", () => {
-    const events = collect({
-      type: "stream_event",
-      event: { type: "message_start", message: {} },
-    });
-    expect(events).toEqual([]);
-  });
 });
 
 describe("createClaudeSession", () => {
-  // We can't invoke send() (no real SDK), but we can verify the factory
-  // selects the right backend for both V1 and V2 paths.
-
-  // -- Auto-selection --
-
   test("auto-selects V2 for basic options", () => {
     const session = createClaudeSession({ model: "haiku" });
     expect(session).toHaveProperty("sessionId");
@@ -312,14 +565,12 @@ describe("createClaudeSession", () => {
     session.close();
   });
 
-  // -- Explicit sdkVersion --
-
   test("sdkVersion: 'v2' forces V2 even with V1-only options", () => {
     const session = createClaudeSession({
       model: "haiku",
       sdkVersion: "v2",
-      cwd: "/tmp",          // V1-only, will be ignored
-      maxTurns: 3,           // V1-only, will be ignored
+      cwd: "/tmp",
+      maxTurns: 3,
     });
     expect(session).toHaveProperty("send");
     session.close();
