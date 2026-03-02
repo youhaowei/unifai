@@ -1,3 +1,44 @@
+// --- Interaction types (unified across providers) ---
+
+export interface ApprovalRequest {
+  id: string;
+  kind: "command" | "file_change";
+  description: string;
+  detail: unknown;
+  availableDecisions?: string[];
+}
+
+export type ApprovalDecision = "approve" | "approve_session" | "deny" | "cancel";
+
+export interface AgentQuestion {
+  id: string;
+  header: string;
+  question: string;
+  /** If true, free-form text answer is allowed */
+  freeform: boolean;
+  /** If true, input should be masked (password) */
+  secret: boolean;
+  /** If true, multiple options can be selected */
+  multiSelect?: boolean;
+  options?: Array<{ label: string; description: string }>;
+}
+
+export interface AgentQuestionRequest {
+  id: string;
+  questions: AgentQuestion[];
+}
+
+export interface AgentQuestionResponse {
+  answers: Record<string, string[]>;
+}
+
+export interface InteractionHandlers {
+  /** Called when the agent needs approval before executing a command or file change */
+  onApprovalRequest?: (request: ApprovalRequest) => Promise<ApprovalDecision>;
+  /** Called when the agent asks the user a question */
+  onAgentQuestion?: (request: AgentQuestionRequest) => Promise<AgentQuestionResponse>;
+}
+
 // --- Agent Events (discriminated union on `type`) ---
 
 export interface SessionInitEvent {
@@ -204,6 +245,34 @@ export interface TaskNotificationEvent {
   summary: string;
 }
 
+// --- Interaction events (observable, emitted alongside callback handling) ---
+
+export interface ApprovalRequestEvent {
+  type: "approval_request";
+  id: string;
+  kind: "command" | "file_change";
+  description: string;
+  detail: unknown;
+}
+
+export interface ApprovalResponseEvent {
+  type: "approval_response";
+  id: string;
+  decision: ApprovalDecision;
+}
+
+export interface AgentQuestionEvent {
+  type: "agent_question";
+  id: string;
+  questions: AgentQuestion[];
+}
+
+export interface AgentQuestionResponseEvent {
+  type: "agent_question_response";
+  id: string;
+  answers: Record<string, string[]>;
+}
+
 // --- Discriminated union ---
 
 export type AgentEvent =
@@ -235,7 +304,12 @@ export type AgentEvent =
   | HookProgressEvent
   | HookResponseEvent
   // Task notification
-  | TaskNotificationEvent;
+  | TaskNotificationEvent
+  // Interaction events
+  | ApprovalRequestEvent
+  | ApprovalResponseEvent
+  | AgentQuestionEvent
+  | AgentQuestionResponseEvent;
 
 // --- Provider kinds ---
 
@@ -250,41 +324,21 @@ export interface BaseSessionOptions {
   maxTurns?: number;
   abortController?: AbortController;
   includeRawEvents?: boolean;
+  interaction?: InteractionHandlers;
 }
 
 export interface ClaudeSessionOptions extends BaseSessionOptions {
-  /**
-   * Which Claude SDK backend to use.
-   *
-   * - `"v2"` — Persistent session via `unstable_v2_createSession`. One live process
-   *   across multiple `send()` calls — efficient for multi-turn orchestration.
-   *   Supports: `model`, `env`, `allowedTools`, `disallowedTools`, `permissionMode`, `hooks`.
-   *
-   * - `"v1"` — One-shot `query()` per `send()`, resumed via session ID. Heavier per
-   *   turn but supports all options including `cwd`, `maxTurns`, `outputFormat`,
-   *   `includePartialMessages`, `maxBudgetUsd`, `maxThinkingTokens`, `mcpServers`, `agents`.
-   *
-   * - `undefined` (default) — Auto-selects V2 when all options are V2-compatible,
-   *   falls back to V1 otherwise.
-   */
-  sdkVersion?: "v1" | "v2";
   resume?: string;
   permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk";
   allowDangerouslySkipPermissions?: boolean;
   allowedTools?: string[];
   disallowedTools?: string[];
-  /** V1 only. Ignored when sdkVersion is "v2". */
   maxBudgetUsd?: number;
-  /** V1 only. Ignored when sdkVersion is "v2". */
   maxThinkingTokens?: number;
-  /** V1 only. Ignored when sdkVersion is "v2". */
   outputFormat?: { type: "json_schema"; schema: Record<string, unknown> };
-  /** V1 only. Ignored when sdkVersion is "v2". */
   mcpServers?: Record<string, unknown>;
-  /** V1 only. Ignored when sdkVersion is "v2". */
   agents?: Record<string, unknown>;
   hooks?: Record<string, unknown>;
-  /** V1 only. Ignored when sdkVersion is "v2". */
   includePartialMessages?: boolean;
 }
 
@@ -293,6 +347,8 @@ export interface CodexSessionOptions extends BaseSessionOptions {
   resume?: string;
   sandboxMode?: "read-only" | "workspace-write" | "danger-full-access";
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  approvalPolicy?: "untrusted" | "on-failure" | "on-request" | "never";
+  instructions?: string;
 }
 
 export type SessionOptions = ClaudeSessionOptions | CodexSessionOptions;

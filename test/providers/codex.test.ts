@@ -1,34 +1,21 @@
 import { describe, test, expect } from "bun:test";
-import { mapThreadEvent } from "../../src/providers/codex";
+import { mapItemStarted, mapItemCompleted } from "../../src/providers/codex";
 import type { AgentEvent } from "../../src/types";
 
-function collect(event: unknown, includeRaw = false): AgentEvent[] {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return [...mapThreadEvent(event as any, includeRaw)];
+function collectStarted(item: Record<string, unknown>): AgentEvent[] {
+  return [...mapItemStarted(item as any)];
 }
 
-describe("mapThreadEvent", () => {
-  test("maps thread.started → session_init", () => {
-    const events = collect({
-      type: "thread.started",
-      thread_id: "thread-abc-123",
-    });
+function collectCompleted(item: Record<string, unknown>): AgentEvent[] {
+  return [...mapItemCompleted(item as any)];
+}
 
-    expect(events).toEqual([
-      { type: "session_init", sessionId: "thread-abc-123" },
-    ]);
-  });
-
-  test("maps item.started command_execution → tool_start (Bash)", () => {
-    const events = collect({
-      type: "item.started",
-      item: {
-        id: "item-1",
-        type: "command_execution",
-        command: "ls -la",
-        aggregated_output: "",
-        status: "in_progress",
-      },
+describe("mapItemStarted", () => {
+  test("maps commandExecution → tool_start (Bash)", () => {
+    const events = collectStarted({
+      id: "item-1",
+      type: "commandExecution",
+      command: "ls -la",
     });
 
     expect(events).toEqual([
@@ -41,16 +28,28 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps item.started file_change → tool_start (Edit)", () => {
-    const changes = [{ path: "src/index.ts", kind: "update" }];
-    const events = collect({
-      type: "item.started",
-      item: {
-        id: "item-2",
-        type: "file_change",
-        changes,
-        status: "completed",
+  test("maps commandExecution without command → empty string input", () => {
+    const events = collectStarted({
+      id: "item-1b",
+      type: "commandExecution",
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool_start",
+        toolUseId: "item-1b",
+        toolName: "Bash",
+        input: "",
       },
+    ]);
+  });
+
+  test("maps fileChange → tool_start (Edit)", () => {
+    const changes = [{ path: "src/index.ts", kind: "update" }];
+    const events = collectStarted({
+      id: "item-2",
+      type: "fileChange",
+      changes,
     });
 
     expect(events).toEqual([
@@ -63,17 +62,13 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps item.started mcp_tool_call → tool_start with composite name", () => {
-    const events = collect({
-      type: "item.started",
-      item: {
-        id: "item-3",
-        type: "mcp_tool_call",
-        server: "filesystem",
-        tool: "read_file",
-        arguments: { path: "/tmp/test.txt" },
-        status: "in_progress",
-      },
+  test("maps mcpToolCall → tool_start with composite name", () => {
+    const events = collectStarted({
+      id: "item-3",
+      type: "mcpToolCall",
+      server: "filesystem",
+      tool: "read_file",
+      arguments: { path: "/tmp/test.txt" },
     });
 
     expect(events).toEqual([
@@ -86,14 +81,65 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps item.completed agent_message → text_complete", () => {
-    const events = collect({
-      type: "item.completed",
-      item: {
-        id: "item-4",
-        type: "agent_message",
-        text: "I've completed the task.",
+  test("maps dynamicToolCall → tool_start with tool name", () => {
+    const events = collectStarted({
+      id: "item-4",
+      type: "dynamicToolCall",
+      tool: "custom_tool",
+      arguments: { foo: "bar" },
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool_start",
+        toolUseId: "item-4",
+        toolName: "custom_tool",
+        input: { foo: "bar" },
       },
+    ]);
+  });
+
+  test("maps dynamicToolCall without tool name → fallback name", () => {
+    const events = collectStarted({
+      id: "item-4b",
+      type: "dynamicToolCall",
+      arguments: {},
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool_start",
+        toolUseId: "item-4b",
+        toolName: "dynamic_tool",
+        input: {},
+      },
+    ]);
+  });
+
+  test("ignores non-tool item types (agentMessage)", () => {
+    const events = collectStarted({
+      id: "item-x",
+      type: "agentMessage",
+      text: "hello",
+    });
+    expect(events).toEqual([]);
+  });
+
+  test("ignores unknown item types", () => {
+    const events = collectStarted({
+      id: "item-y",
+      type: "unknownType",
+    });
+    expect(events).toEqual([]);
+  });
+});
+
+describe("mapItemCompleted", () => {
+  test("maps agentMessage → text_complete", () => {
+    const events = collectCompleted({
+      id: "item-5",
+      type: "agentMessage",
+      text: "I've completed the task.",
     });
 
     expect(events).toEqual([
@@ -101,14 +147,22 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps item.completed reasoning → thinking_delta", () => {
-    const events = collect({
-      type: "item.completed",
-      item: {
-        id: "item-5",
-        type: "reasoning",
-        text: "I should check the file first...",
-      },
+  test("maps agentMessage without text → empty string", () => {
+    const events = collectCompleted({
+      id: "item-5b",
+      type: "agentMessage",
+    });
+
+    expect(events).toEqual([
+      { type: "text_complete", text: "" },
+    ]);
+  });
+
+  test("maps reasoning with text → thinking_delta", () => {
+    const events = collectCompleted({
+      id: "item-6",
+      type: "reasoning",
+      text: "I should check the file first...",
     });
 
     expect(events).toEqual([
@@ -116,23 +170,30 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps item.completed command_execution → tool_result", () => {
-    const events = collect({
-      type: "item.completed",
-      item: {
-        id: "item-6",
-        type: "command_execution",
-        command: "ls -la",
-        aggregated_output: "total 8\ndrwxr-xr-x ...",
-        exit_code: 0,
-        status: "completed",
-      },
+  test("maps reasoning with summary array → joined thinking_delta", () => {
+    const events = collectCompleted({
+      id: "item-6b",
+      type: "reasoning",
+      summary: ["Step 1: Read file", "Step 2: Modify"],
+    });
+
+    expect(events).toEqual([
+      { type: "thinking_delta", text: "Step 1: Read file\nStep 2: Modify" },
+    ]);
+  });
+
+  test("maps commandExecution completed → tool_result", () => {
+    const events = collectCompleted({
+      id: "item-7",
+      type: "commandExecution",
+      aggregatedOutput: "total 8\ndrwxr-xr-x ...",
+      status: "completed",
     });
 
     expect(events).toEqual([
       {
         type: "tool_result",
-        toolUseId: "item-6",
+        toolUseId: "item-7",
         toolName: "Bash",
         result: "total 8\ndrwxr-xr-x ...",
         isError: false,
@@ -140,41 +201,56 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps item.completed failed command → tool_result with isError", () => {
-    const events = collect({
-      type: "item.completed",
-      item: {
-        id: "item-7",
-        type: "command_execution",
-        command: "invalid-cmd",
-        aggregated_output: "command not found",
-        exit_code: 127,
-        status: "failed",
-      },
-    });
-
-    expect(events[0]).toMatchObject({
-      type: "tool_result",
-      isError: true,
-    });
-  });
-
-  test("maps item.completed file_change → tool_result", () => {
-    const changes = [{ path: "src/app.ts", kind: "update" }];
-    const events = collect({
-      type: "item.completed",
-      item: {
-        id: "item-8",
-        type: "file_change",
-        changes,
-        status: "completed",
-      },
+  test("maps commandExecution failed → tool_result with isError", () => {
+    const events = collectCompleted({
+      id: "item-8",
+      type: "commandExecution",
+      aggregatedOutput: "command not found",
+      status: "failed",
     });
 
     expect(events).toEqual([
       {
         type: "tool_result",
         toolUseId: "item-8",
+        toolName: "Bash",
+        result: "command not found",
+        isError: true,
+      },
+    ]);
+  });
+
+  test("maps commandExecution without output → empty string result", () => {
+    const events = collectCompleted({
+      id: "item-8b",
+      type: "commandExecution",
+      status: "completed",
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "item-8b",
+        toolName: "Bash",
+        result: "",
+        isError: false,
+      },
+    ]);
+  });
+
+  test("maps fileChange completed → tool_result", () => {
+    const changes = [{ path: "src/app.ts", kind: "update" }];
+    const events = collectCompleted({
+      id: "item-9",
+      type: "fileChange",
+      changes,
+      status: "completed",
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "item-9",
         toolName: "Edit",
         result: changes,
         isError: false,
@@ -182,25 +258,36 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps item.completed mcp_tool_call → tool_result", () => {
-    const result = { content: [{ type: "text", text: "file contents" }], structured_content: null };
-    const events = collect({
-      type: "item.completed",
-      item: {
-        id: "item-9",
-        type: "mcp_tool_call",
-        server: "filesystem",
-        tool: "read_file",
-        arguments: { path: "/tmp/test.txt" },
-        result,
-        status: "completed",
-      },
+  test("maps fileChange failed → tool_result with isError", () => {
+    const events = collectCompleted({
+      id: "item-9b",
+      type: "fileChange",
+      changes: [],
+      status: "failed",
+    });
+
+    expect(events[0]).toMatchObject({
+      type: "tool_result",
+      toolName: "Edit",
+      isError: true,
+    });
+  });
+
+  test("maps mcpToolCall completed → tool_result", () => {
+    const result = { content: [{ type: "text", text: "file contents" }] };
+    const events = collectCompleted({
+      id: "item-10",
+      type: "mcpToolCall",
+      server: "filesystem",
+      tool: "read_file",
+      result,
+      status: "completed",
     });
 
     expect(events).toEqual([
       {
         type: "tool_result",
-        toolUseId: "item-9",
+        toolUseId: "item-10",
         toolName: "mcp__filesystem__read_file",
         result,
         isError: false,
@@ -208,14 +295,73 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps item.completed error → error event", () => {
-    const events = collect({
-      type: "item.completed",
-      item: {
-        id: "item-10",
-        type: "error",
-        message: "Something went wrong",
+  test("maps mcpToolCall failed → tool_result with error", () => {
+    const events = collectCompleted({
+      id: "item-10b",
+      type: "mcpToolCall",
+      server: "filesystem",
+      tool: "read_file",
+      error: "File not found",
+      status: "failed",
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "item-10b",
+        toolName: "mcp__filesystem__read_file",
+        result: "File not found",
+        isError: true,
       },
+    ]);
+  });
+
+  test("maps dynamicToolCall completed → tool_result", () => {
+    const contentItems = [{ type: "text", text: "result" }];
+    const events = collectCompleted({
+      id: "item-11",
+      type: "dynamicToolCall",
+      tool: "custom_tool",
+      contentItems,
+      success: true,
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "item-11",
+        toolName: "custom_tool",
+        result: contentItems,
+        isError: false,
+      },
+    ]);
+  });
+
+  test("maps dynamicToolCall failed → tool_result with isError", () => {
+    const events = collectCompleted({
+      id: "item-11b",
+      type: "dynamicToolCall",
+      tool: "failing_tool",
+      contentItems: null,
+      success: false,
+    });
+
+    expect(events).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "item-11b",
+        toolName: "failing_tool",
+        result: null,
+        isError: true,
+      },
+    ]);
+  });
+
+  test("maps error item → error event", () => {
+    const events = collectCompleted({
+      id: "item-12",
+      type: "error",
+      message: "Something went wrong",
     });
 
     expect(events).toEqual([
@@ -228,107 +374,26 @@ describe("mapThreadEvent", () => {
     ]);
   });
 
-  test("maps turn.completed → turn_complete with usage", () => {
-    const events = collect({
-      type: "turn.completed",
-      usage: {
-        input_tokens: 1500,
-        output_tokens: 800,
-        cached_input_tokens: 300,
-      },
-    });
-
-    expect(events).toEqual([
-      {
-        type: "turn_complete",
-        usage: {
-          inputTokens: 1500,
-          outputTokens: 800,
-          cacheReadTokens: 300,
-        },
-      },
-    ]);
-  });
-
-  test("maps turn.completed with zero cached tokens → preserves 0", () => {
-    const events = collect({
-      type: "turn.completed",
-      usage: {
-        input_tokens: 100,
-        output_tokens: 50,
-        cached_input_tokens: 0,
-      },
-    });
-
-    expect(events).toEqual([
-      {
-        type: "turn_complete",
-        usage: {
-          inputTokens: 100,
-          outputTokens: 50,
-          cacheReadTokens: 0,
-        },
-      },
-    ]);
-  });
-
-  test("maps turn.completed without usage", () => {
-    const events = collect({ type: "turn.completed" });
-
-    expect(events).toEqual([
-      { type: "turn_complete", usage: undefined },
-    ]);
-  });
-
-  test("maps turn.failed → error", () => {
-    const events = collect({
-      type: "turn.failed",
-      error: { message: "Rate limit exceeded" },
-    });
-
-    expect(events).toEqual([
-      {
-        type: "error",
-        message: "Rate limit exceeded",
-        code: "TURN_FAILED",
-        recoverable: false,
-      },
-    ]);
-  });
-
-  test("maps thread error → error", () => {
-    const events = collect({
+  test("maps error item without message → fallback message", () => {
+    const events = collectCompleted({
+      id: "item-12b",
       type: "error",
-      message: "Connection lost",
     });
 
     expect(events).toEqual([
       {
         type: "error",
-        message: "Connection lost",
-        code: "THREAD_ERROR",
+        message: "Unknown error",
+        code: "ITEM_ERROR",
         recoverable: false,
       },
     ]);
   });
 
-  test("includes raw event when includeRaw is true", () => {
-    const event = { type: "thread.started", thread_id: "t-1" };
-    const events = collect(event, true);
-
-    expect(events[0]).toEqual({
-      type: "raw",
-      provider: "codex",
-      eventType: "thread.started",
-      data: event,
-    });
-    expect(events[1]!.type).toBe("session_init");
-  });
-
-  test("ignores item.started for non-tool items", () => {
-    const events = collect({
-      type: "item.started",
-      item: { id: "item-x", type: "agent_message", text: "hi" },
+  test("ignores unknown item types", () => {
+    const events = collectCompleted({
+      id: "item-z",
+      type: "unknownType",
     });
     expect(events).toEqual([]);
   });

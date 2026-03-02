@@ -530,7 +530,7 @@ describe("mapSdkMessage", () => {
 });
 
 describe("createClaudeSession", () => {
-  test("auto-selects V2 for basic options", () => {
+  test("creates session with basic options", () => {
     const session = createClaudeSession({ model: "haiku" });
     expect(session).toHaveProperty("sessionId");
     expect(session).toHaveProperty("send");
@@ -539,47 +539,14 @@ describe("createClaudeSession", () => {
     session.close();
   });
 
-  test("auto-selects V1 when V1-only options are present", () => {
-    const session = createClaudeSession({ model: "haiku", cwd: "/tmp" });
-    expect(session).toHaveProperty("send");
-    session.close();
-  });
-
-  test("auto-selects V1 for outputFormat", () => {
+  test("creates session with all options", () => {
     const session = createClaudeSession({
       model: "haiku",
-      outputFormat: { type: "json_schema", schema: { type: "object" } },
-    });
-    expect(session).toHaveProperty("send");
-    session.close();
-  });
-
-  test("auto-selects V2 when only V2-compatible options are set", () => {
-    const session = createClaudeSession({
-      model: "haiku",
+      cwd: "/tmp",
       allowedTools: ["Read"],
       permissionMode: "plan",
       env: { HOME: "/tmp" },
-    });
-    expect(session).toHaveProperty("send");
-    session.close();
-  });
-
-  test("sdkVersion: 'v2' forces V2 even with V1-only options", () => {
-    const session = createClaudeSession({
-      model: "haiku",
-      sdkVersion: "v2",
-      cwd: "/tmp",
-      maxTurns: 3,
-    });
-    expect(session).toHaveProperty("send");
-    session.close();
-  });
-
-  test("sdkVersion: 'v1' forces V1 even without V1-only options", () => {
-    const session = createClaudeSession({
-      model: "haiku",
-      sdkVersion: "v1",
+      outputFormat: { type: "json_schema", schema: { type: "object" } },
     });
     expect(session).toHaveProperty("send");
     session.close();

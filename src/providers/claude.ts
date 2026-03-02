@@ -1,10 +1,16 @@
 import {
   query as sdkQuery,
-  unstable_v2_createSession as createSdkSession,
-  unstable_v2_resumeSession as resumeSdkSession,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { SDKSession, SDKSessionOptions } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentEvent, ClaudeSessionOptions, Usage, ModelUsage, ContentBlock, ModelInfo } from "../types";
+import type {
+  AgentEvent,
+  ClaudeSessionOptions,
+  Usage,
+  ModelUsage,
+  ContentBlock,
+  ModelInfo,
+  InteractionHandlers,
+  AgentQuestion,
+} from "../types";
 import type { ProviderSession } from "../provider";
 
 // --- Event mapping (pure, exported for testing) ---
@@ -294,78 +300,100 @@ function extractUsage(raw: any): Usage {
   };
 }
 
-// --- V2 provider session (unstable session API) ---
-// Used when all options are V2-compatible: cleaner send()/stream() lifecycle.
+// --- Interaction callback bridge ---
 
-class ClaudeV2ProviderSession implements ProviderSession {
-  private session: SDKSession | null = null;
-  private _sessionId: string | null = null;
+let nextInteractionId = 1;
 
-  constructor(private readonly options: ClaudeSessionOptions) {
-    this._sessionId = options.resume ?? null;
+function buildCanUseTool(
+  handlers: InteractionHandlers,
+  emitEvent: (event: AgentEvent) => void,
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+): ((toolName: string, input: any) => Promise<any>) | undefined {
+  if (!handlers.onApprovalRequest && !handlers.onAgentQuestion) return undefined;
 
-    // Wire abort signal → close session (V2 has no native AbortController option)
-    if (options.abortController) {
-      options.abortController.signal.addEventListener("abort", () => {
-        this.session?.close();
-      }, { once: true });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return async (toolName: string, input: any) => {
+    // Handle AskUserQuestion → onAgentQuestion
+    if (toolName === "AskUserQuestion" && handlers.onAgentQuestion) {
+      const questions: AgentQuestion[] = Array.isArray(input?.questions)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ? input.questions.map((q: any, i: number) => ({
+            id: q.id ?? `q_${i}`,
+            header: q.header ?? "",
+            question: typeof q === "string" ? q : (q.question ?? q.text ?? ""),
+            freeform: true,
+            secret: false,
+            multiSelect: q.multiSelect ?? false,
+            options: Array.isArray(q.options)
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              ? q.options.map((o: any) => ({
+                  label: typeof o === "string" ? o : (o.label ?? o.value ?? ""),
+                  description: typeof o === "string" ? "" : (o.description ?? ""),
+                }))
+              : undefined,
+          }))
+        : [];
+
+      const requestId = `claude_input_${nextInteractionId++}`;
+      emitEvent({ type: "agent_question", id: requestId, questions });
+
+      const response = await handlers.onAgentQuestion({ id: requestId, questions });
+      emitEvent({ type: "agent_question_response", id: requestId, answers: response.answers });
+
+      // Map back to Claude format: answers keyed by question text
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const claudeAnswers: Record<string, string> = {};
+      for (const [qId, answers] of Object.entries(response.answers)) {
+        // Find the original question to use its text as key
+        const question = questions.find((q) => q.id === qId);
+        const key = question?.question ?? qId;
+        claudeAnswers[key] = answers[0] ?? "";
+      }
+
+      return {
+        behavior: "allow",
+        updatedInput: { ...input, answers: claudeAnswers },
+      };
     }
-  }
 
-  get sessionId() {
-    return this._sessionId;
-  }
-
-  async *send(message: string): AsyncGenerator<AgentEvent> {
-    if (!this.session) {
-      const sdkOpts: SDKSessionOptions = {
-        model: this.options.model,
-        env: this.options.env,
-        allowedTools: this.options.allowedTools,
-        disallowedTools: this.options.disallowedTools,
-        permissionMode: this.options.permissionMode,
-        hooks: this.options.hooks as SDKSessionOptions["hooks"],
+    // Handle tool approval → onApprovalRequest
+    if (handlers.onApprovalRequest) {
+      const approvalId = `claude_approval_${nextInteractionId++}`;
+      const request = {
+        id: approvalId,
+        kind: "command" as const,
+        description: `Tool: ${toolName}`,
+        detail: input,
       };
 
-      this.session = this._sessionId
-        ? resumeSdkSession(this._sessionId, sdkOpts)
-        : createSdkSession(sdkOpts);
-    }
+      emitEvent({ type: "approval_request", ...request });
 
-    await this.session.send(message);
+      const decision = await handlers.onApprovalRequest(request);
+      emitEvent({ type: "approval_response", id: approvalId, decision });
 
-    const includeRaw = this.options.includeRawEvents ?? false;
-
-    for await (const msg of this.session.stream()) {
-      if (msg.type === "system" && (msg as any).subtype === "init") {
-        this._sessionId = (msg as any).session_id ?? null;
+      if (decision === "approve" || decision === "approve_session") {
+        return { behavior: "allow", updatedInput: input };
       }
-      yield* mapSdkMessage(msg, includeRaw);
+      return { behavior: "deny", message: "User rejected" };
     }
-  }
 
-  abort() {
-    this.session?.close();
-  }
-
-  close() {
-    this.session?.close();
-    this.session = null;
-  }
+    // No relevant handler — allow by default (SDK's own permissionMode governs)
+    return { behavior: "allow", updatedInput: input };
+  };
 }
 
-// --- V1 provider session (query API) ---
-// Fallback when options require fields V2 doesn't support yet
-// (cwd, maxTurns, outputFormat, includePartialMessages, etc.)
+// --- Provider session (query API) ---
 
 class ClaudeV1ProviderSession implements ProviderSession {
   private _sessionId: string | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private currentQuery: any = null;
   private abortController: AbortController;
+  private handlers: InteractionHandlers;
 
   constructor(private readonly options: ClaudeSessionOptions) {
     this.abortController = options.abortController ?? new AbortController();
+    this.handlers = options.interaction ?? {};
   }
 
   get sessionId() {
@@ -373,6 +401,12 @@ class ClaudeV1ProviderSession implements ProviderSession {
   }
 
   async *send(message: string): AsyncGenerator<AgentEvent> {
+    // Buffer for interaction events that arrive via canUseTool callback
+    const pendingEvents: AgentEvent[] = [];
+    const canUseTool = buildCanUseTool(this.handlers, (event) => {
+      pendingEvents.push(event);
+    });
+
     const sdkOptions = {
       model: this.options.model,
       abortController: this.abortController,
@@ -391,6 +425,7 @@ class ClaudeV1ProviderSession implements ProviderSession {
       agents: this.options.agents,
       hooks: this.options.hooks,
       resume: this._sessionId ?? this.options.resume,
+      ...(canUseTool && { canUseTool }),
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -398,12 +433,78 @@ class ClaudeV1ProviderSession implements ProviderSession {
     this.currentQuery = stream;
     const includeRaw = this.options.includeRawEvents ?? false;
 
+    // Track tools that have been started but not yet completed.
+    // Claude SDK doesn't emit individual tool_result events — we synthesize them
+    // when the next message_start arrives (new API turn = previous tools completed).
+    const pendingTools = new Map<string, string>(); // toolUseId → toolName
+
+    // Track whether text was streamed via text_delta for the current turn.
+    // When extended thinking is enabled or for certain final turns, stream_event
+    // messages may not be emitted — text only arrives in the assistant_message.
+    // We backfill text_delta events in that case so consumers receive all text.
+    let streamedTextThisTurn = false;
+
     try {
       for await (const msg of stream) {
-        if (msg.type === "system" && (msg as any).subtype === "init") {
-          this._sessionId = (msg as any).session_id ?? null;
+        // Flush any interaction events that were buffered during canUseTool
+        while (pendingEvents.length > 0) {
+          yield pendingEvents.shift()!;
         }
-        yield* mapSdkMessage(msg, includeRaw);
+
+        if (msg.type === "system" && msg.subtype === "init") {
+          this._sessionId = msg.session_id ?? null;
+        }
+
+        // A new message_start means the previous turn's tools have all completed
+        if (msg.type === "stream_event" && msg.event.type === "message_start" && pendingTools.size > 0) {
+          for (const [toolUseId, toolName] of pendingTools) {
+            yield { type: "tool_result", toolUseId, toolName, result: undefined, isError: false };
+          }
+          pendingTools.clear();
+        }
+
+        for (const event of mapSdkMessage(msg, includeRaw)) {
+          // Reset per-turn text tracking on new message
+          if (event.type === "message_start") {
+            streamedTextThisTurn = false;
+          }
+          if (event.type === "text_delta") {
+            streamedTextThisTurn = true;
+          }
+
+          // Backfill text as text_delta when it wasn't streamed for this turn.
+          // This happens when stream_event messages are suppressed (e.g. extended thinking).
+          if (event.type === "assistant_message" && !streamedTextThisTurn) {
+            for (const block of event.content) {
+              if (block.type === "text" && block.text) {
+                yield { type: "content_block_start", index: 0, blockType: "text" as const };
+                yield { type: "text_delta", text: block.text };
+                yield { type: "content_block_stop", index: 0 };
+              }
+            }
+          }
+
+          // Track tools from both tool_start (top-level assistant messages) and
+          // content_block_start (nested subagent tools that only appear in stream events)
+          if (event.type === "tool_start") {
+            pendingTools.set(event.toolUseId, event.toolName);
+          } else if (event.type === "content_block_start" && event.blockType === "tool_use" && event.id && event.name) {
+            pendingTools.set(event.id, event.name);
+          } else if (event.type === "tool_result") {
+            pendingTools.delete(event.toolUseId);
+          }
+          yield event;
+        }
+      }
+
+      // Complete any remaining tools at stream end
+      for (const [toolUseId, toolName] of pendingTools) {
+        yield { type: "tool_result", toolUseId, toolName, result: undefined, isError: false };
+      }
+
+      // Flush remaining interaction events
+      while (pendingEvents.length > 0) {
+        yield pendingEvents.shift()!;
       }
     } finally {
       this.currentQuery = null;
@@ -424,38 +525,8 @@ class ClaudeV1ProviderSession implements ProviderSession {
 
 // --- Factory ---
 
-/** Options not yet available in V2 SDKSessionOptions. */
-const V1_ONLY_OPTIONS: (keyof ClaudeSessionOptions)[] = [
-  "cwd",
-  "maxTurns",
-  "maxBudgetUsd",
-  "maxThinkingTokens",
-  "includePartialMessages",
-  "outputFormat",
-  "mcpServers",
-  "agents",
-  "allowDangerouslySkipPermissions",
-];
-
-function hasV1OnlyOptions(options: ClaudeSessionOptions): boolean {
-  return V1_ONLY_OPTIONS.some((key) => options[key] != null);
-}
-
 export function createClaudeSession(options: ClaudeSessionOptions): ProviderSession {
-  const version = options.sdkVersion;
-
-  if (version === "v1") {
-    return new ClaudeV1ProviderSession(options);
-  }
-
-  if (version === "v2") {
-    return new ClaudeV2ProviderSession(options);
-  }
-
-  // Auto: prefer V2, fall back to V1 when V1-only options are present
-  return hasV1OnlyOptions(options)
-    ? new ClaudeV1ProviderSession(options)
-    : new ClaudeV2ProviderSession(options);
+  return new ClaudeV1ProviderSession(options);
 }
 
 // --- Model discovery ---
