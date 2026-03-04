@@ -6,6 +6,8 @@ export class UnifaiError extends Error {
 }
 
 export class ProviderError extends UnifaiError {
+  declare cause?: unknown;
+
   constructor(
     message: string,
     public readonly provider: string,
