@@ -424,6 +424,7 @@ class ClaudeV1ProviderSession implements ProviderSession {
       mcpServers: this.options.mcpServers,
       agents: this.options.agents,
       hooks: this.options.hooks,
+      pathToClaudeCodeExecutable: this.options.pathToClaudeCodeExecutable,
       resume: this._sessionId ?? this.options.resume,
       ...(canUseTool && { canUseTool }),
     };

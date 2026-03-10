@@ -328,6 +328,7 @@ export interface BaseSessionOptions {
 }
 
 export interface ClaudeSessionOptions extends BaseSessionOptions {
+  pathToClaudeCodeExecutable?: string;
   resume?: string;
   permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk";
   allowDangerouslySkipPermissions?: boolean;
