@@ -456,7 +456,33 @@ class ClaudeV1ProviderSession implements ProviderSession {
           this._sessionId = msg.session_id ?? null;
         }
 
-        // A new message_start means the previous turn's tools have all completed
+        // Extract real tool_result events from SDK "user" messages.
+        // After the SDK executes tools, it emits a "user" message containing
+        // tool_result content blocks with the actual output (file contents,
+        // match counts, exit codes, etc.). This gives us per-tool completion
+        // signals with real result data.
+        if (msg.type === "user") {
+          const content = msg.message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === "tool_result" && block.tool_use_id) {
+                const toolUseId = String(block.tool_use_id);
+                const toolName = pendingTools.get(toolUseId) ?? "";
+                pendingTools.delete(toolUseId);
+                yield {
+                  type: "tool_result",
+                  toolUseId,
+                  toolName,
+                  result: block.content,
+                  isError: !!block.is_error,
+                };
+              }
+            }
+          }
+        }
+
+        // Fallback: synthesize tool_result at turn boundaries for any tools
+        // that weren't resolved by a "user" message (e.g. older SDK versions).
         if (msg.type === "stream_event" && msg.event.type === "message_start" && pendingTools.size > 0) {
           for (const [toolUseId, toolName] of pendingTools) {
             yield { type: "tool_result", toolUseId, toolName, result: undefined, isError: false };
